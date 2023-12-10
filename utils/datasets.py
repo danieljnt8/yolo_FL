@@ -138,17 +138,17 @@ def create_dataloaders(path, imgsz, batch_size, stride, single_cls=False, hyp=No
                                       prefix=prefix)
 
     # Split the dataset into partitions for each client
-    print(num_clients)
-    print(len(dataset))
+    #print(num_clients)
+    #print(len(dataset))
     partition_size = len(dataset) // num_clients
-    print(partition_size)
+    #print(partition_size)
 
     # Calculate the remaining items after evenly dividing the dataset
     remainder = len(dataset) % num_clients
 
     # Create a list of partition sizes, with the last partition adjusted for the remainder
     lengths = [partition_size + 1 if i < remainder else partition_size for i in range(num_clients)]
-    print(lengths)
+    #print(lengths)
 
 
     datasets = random_split(dataset, lengths, generator=torch.Generator().manual_seed(42))
@@ -169,6 +169,79 @@ def create_dataloaders(path, imgsz, batch_size, stride, single_cls=False, hyp=No
         dataloaders.append(dataloader)
 
     return dataloaders,dataset
+
+
+def create_dataloaders_fl(path, imgsz, batch_size, stride, single_cls=False, hyp=None, augment=False, cache=False, pad=0.0,
+                        rect=False, rank=-1, workers=8, image_weights=False, quad=False, prefix='', num_clients=1,
+                        train_ratio=0.8):
+    # Make sure only the first process in DDP process the dataset first, and the following others can use the cache
+    with torch_distributed_zero_first(rank):
+        dataset = LoadImagesAndLabels(path, imgsz, batch_size,
+                                      augment=augment,  # augment images
+                                      hyp=hyp,  # augmentation hyperparameters
+                                      rect=rect,  # rectangular training
+                                      cache_images=cache,
+                                      single_cls=single_cls,
+                                      stride=int(stride),
+                                      pad=pad,
+                                      image_weights=image_weights,
+                                      prefix=prefix)
+
+    # Split the dataset into partitions for each client
+    print(num_clients)
+    print(len(dataset))
+    partition_size = len(dataset) // num_clients
+    print(partition_size)
+
+    # Calculate the remaining items after evenly dividing the dataset
+    remainder = len(dataset) % num_clients
+
+    # Create a list of partition sizes, with the last partition adjusted for the remainder
+    lengths = [partition_size + 1 if i < remainder else partition_size for i in range(num_clients)]
+    print(lengths)
+
+    datasets = random_split(dataset, lengths, generator=torch.Generator().manual_seed(42))
+
+    train_loaders = []
+    val_loaders = []
+
+    for idx, ds in enumerate(datasets):
+        # Split the dataset into training and validation sets
+        len_val = int(len(ds) * (1 - train_ratio))
+        len_train = len(ds) - len_val
+        lengths_train_val = [len_train, len_val]
+        ds_train, ds_val = random_split(ds, lengths_train_val, generator=torch.Generator().manual_seed(42))
+
+        # Create dataloaders for training and validation sets
+        train_batch_size = min(batch_size, len(ds_train))
+        val_batch_size = min(batch_size, len(ds_val))
+
+        nw_train = min([os.cpu_count(), train_batch_size if train_batch_size > 1 else 0, workers])
+        nw_val = min([os.cpu_count(), val_batch_size if val_batch_size > 1 else 0, workers])
+
+        sampler_train = torch.utils.data.distributed.DistributedSampler(ds_train) if rank != -1 else None
+        sampler_val = torch.utils.data.distributed.DistributedSampler(ds_val) if rank != -1 else None
+
+        loader = torch.utils.data.DataLoader if image_weights else InfiniteDataLoader
+
+        train_loader = loader(ds_train,
+                              batch_size=train_batch_size,
+                              num_workers=nw_train,
+                              sampler=sampler_train,
+                              pin_memory=True,
+                              collate_fn=LoadImagesAndLabels.collate_fn4 if quad else LoadImagesAndLabels.collate_fn)
+
+        val_loader = loader(ds_val,
+                            batch_size=val_batch_size,
+                            num_workers=nw_val,
+                            sampler=sampler_val,
+                            pin_memory=True,
+                            collate_fn=LoadImagesAndLabels.collate_fn4 if quad else LoadImagesAndLabels.collate_fn)
+
+        train_loaders.append(train_loader)
+        val_loaders.append(val_loader)
+
+    return train_loaders, val_loaders, dataset
 
 
 class InfiniteDataLoader(torch.utils.data.dataloader.DataLoader):
