@@ -30,6 +30,8 @@ from utils.augmentations import Albumentations, augment_hsv, copy_paste, letterb
 from utils.general import (LOGGER, check_dataset, check_requirements, check_yaml, clean_str, segments2boxes, xyn2xy,
                            xywh2xyxy, xywhn2xyxy, xyxy2xywhn)
 from utils.torch_utils import torch_distributed_zero_first
+from torch.utils.data import random_split
+
 
 # Parameters
 HELP_URL = 'https://github.com/ultralytics/yolov5/wiki/Train-Custom-Data'
@@ -119,6 +121,54 @@ def create_dataloader(path, imgsz, batch_size, stride, single_cls=False, hyp=Non
                         pin_memory=True,
                         collate_fn=LoadImagesAndLabels.collate_fn4 if quad else LoadImagesAndLabels.collate_fn)
     return dataloader, dataset
+
+def create_dataloaders(path, imgsz, batch_size, stride, single_cls=False, hyp=None, augment=False, cache=False, pad=0.0,
+                        rect=False, rank=-1, workers=8, image_weights=False, quad=False, prefix='', num_clients=1):
+    # Make sure only the first process in DDP process the dataset first, and the following others can use the cache
+    with torch_distributed_zero_first(rank):
+        dataset = LoadImagesAndLabels(path, imgsz, batch_size,
+                                      augment=augment,  # augment images
+                                      hyp=hyp,  # augmentation hyperparameters
+                                      rect=rect,  # rectangular training
+                                      cache_images=cache,
+                                      single_cls=single_cls,
+                                      stride=int(stride),
+                                      pad=pad,
+                                      image_weights=image_weights,
+                                      prefix=prefix)
+
+    # Split the dataset into partitions for each client
+    print(num_clients)
+    print(len(dataset))
+    partition_size = len(dataset) // num_clients
+    print(partition_size)
+
+    # Calculate the remaining items after evenly dividing the dataset
+    remainder = len(dataset) % num_clients
+
+    # Create a list of partition sizes, with the last partition adjusted for the remainder
+    lengths = [partition_size + 1 if i < remainder else partition_size for i in range(num_clients)]
+    print(lengths)
+
+
+    datasets = random_split(dataset, lengths, generator=torch.Generator().manual_seed(42))
+
+    dataloaders = []
+
+    for idx, ds in enumerate(datasets):
+        batch_size_client = min(batch_size, len(ds))
+        nw = min([os.cpu_count(), batch_size_client if batch_size_client > 1 else 0, workers])  # number of workers
+        sampler = torch.utils.data.distributed.DistributedSampler(ds) if rank != -1 else None
+        loader = torch.utils.data.DataLoader if image_weights else InfiniteDataLoader
+        dataloader = loader(ds,
+                            batch_size=batch_size_client,
+                            num_workers=nw,
+                            sampler=sampler,
+                            pin_memory=True,
+                            collate_fn=LoadImagesAndLabels.collate_fn4 if quad else LoadImagesAndLabels.collate_fn)
+        dataloaders.append(dataloader)
+
+    return dataloaders,dataset
 
 
 class InfiniteDataLoader(torch.utils.data.dataloader.DataLoader):
