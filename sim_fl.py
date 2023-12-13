@@ -179,6 +179,7 @@ def init_helper(hyp,  # path/to/hyp.yaml or hyp dictionary
 def train(hyp,  # path/to/hyp.yaml or hyp dictionary
           opt,
           device,
+          cid,
           callbacks,
           model
           ):
@@ -188,9 +189,10 @@ def train(hyp,  # path/to/hyp.yaml or hyp dictionary
 
     # Directories
     print('BEING TRAINED')
-    w = save_dir / 'weights'  # weights dir
+    w = save_dir /str(cid)/'weights'  # weights dir
     (w.parent if evolve else w).mkdir(parents=True, exist_ok=True)  # make dir
-    last, best = w / 'last.pt', w / 'best.pt'
+    #last, best = w / 'last.pt', w / 'best.pt'
+    weights_p = w / 'weights.pt'
 
     # Hyperparameters
     if isinstance(hyp, str):
@@ -407,6 +409,17 @@ def train(hyp,  # path/to/hyp.yaml or hyp dictionary
         # Scheduler
         lr = [x['lr'] for x in optimizer.param_groups]  # for loggers
         scheduler.step()
+    
+    ckpt = {'epoch': epoch,
+                        'best_fitness': best_fitness,
+                        'model': deepcopy(de_parallel(model)).half(),
+                        'ema': deepcopy(ema.ema).half(),
+                        'updates': ema.updates,
+                        'optimizer': optimizer.state_dict(),
+                        'wandb_id': None,
+                        'date': datetime.now().isoformat()}
+
+    torch.save(ckpt,weights_p)
 
     return model
 
@@ -423,10 +436,11 @@ def set_parameters(net, parameters: List[np.ndarray]):
 
 
 class FlowerClient(fl.client.NumPyClient):
-    def __init__(self, net, trainloader, valloader):
+    def __init__(self, net, trainloader, valloader,cid):
         self.net = net
         self.trainloader = trainloader
         self.valloader = valloader
+        self.cid = cid 
 
     
 
@@ -434,13 +448,13 @@ class FlowerClient(fl.client.NumPyClient):
         return get_parameters(self.net)
 
     def fit(self, parameters, config):
-        self.set_parameters(self.net, parameters)
-        train(opt.hyp, opt,device, callbacks=Callbacks(),model= self.net)
+        set_parameters(self.net, parameters)
+        train(opt.hyp, opt,device, self.cid,callbacks=Callbacks(),model= self.net)
         return get_parameters(self.net), len(self.trainloader), {}
 
     def evaluate(self, parameters, config):
-        self.set_parameters(self.net, parameters)
-        loss, accuracy = test(self.net, self.valloader)
+        set_parameters(self.net, parameters)
+        loss, accuracy = (0,0)#test(self.net, self.valloader)
         return float(loss), len(self.valloader), {"accuracy": float(accuracy)}
 
 
@@ -458,7 +472,7 @@ def client_fn(cid: str) -> FlowerClient:
     valloader = val_loader[int(cid)]
 
     # Create a  single Flower client representing a single organization
-    return FlowerClient(net, trainloader, valloader)
+    return FlowerClient(net, trainloader, valloader,cid)
 
 
 
@@ -484,7 +498,8 @@ def prepare(opt, callbacks=Callbacks()):
         if opt.evolve:
             opt.project = str(ROOT / 'runs/evolve')
             opt.exist_ok, opt.resume = opt.resume, False  # pass resume to exist_ok and disable resume
-        opt.save_dir = str(increment_path(Path(opt.project) / opt.name, exist_ok=opt.exist_ok))
+        #opt.save_dir = str(increment_path(Path(opt.project) / opt.name, exist_ok=opt.exist_ok))
+        opt.save_dir = str(Path(opt.project) / opt.name)
 
     # DDP mode
     device = select_device(opt.device, batch_size=opt.batch_size)
