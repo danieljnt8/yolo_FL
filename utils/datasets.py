@@ -222,7 +222,7 @@ def create_dataloaders_fl(path, imgsz, batch_size, stride, single_cls=False, hyp
         sampler_train = torch.utils.data.distributed.DistributedSampler(ds_train) if rank != -1 else None
         sampler_val = torch.utils.data.distributed.DistributedSampler(ds_val) if rank != -1 else None
 
-        loader = torch.utils.data.DataLoader if image_weights else InfiniteDataLoader
+        loader = torch.utils.data.DataLoader if image_weights else InfiniteDataLoaderV1
 
         train_loader = loader(ds_train,
                               batch_size=train_batch_size,
@@ -261,6 +261,27 @@ class InfiniteDataLoader(torch.utils.data.dataloader.DataLoader):
     def __iter__(self):
         for i in range(len(self)):
             yield next(self.iterator)
+
+class InfiniteDataLoaderV1(torch.utils.data.DataLoader):
+    """ Dataloader that reuses workers
+
+    Uses same syntax as vanilla DataLoader
+    """
+
+    def __init__(self, *args, **kwargs):
+        super().__init__(*args, **kwargs)
+        object.__setattr__(self, 'batch_sampler', _RepeatSampler(self.batch_sampler))
+        self.iterator = super().__iter__()
+
+    def __len__(self):
+        return len(self.batch_sampler.sampler)
+
+    def __iter__(self):
+        for i in range(len(self)):
+            yield next(self.iterator)
+
+ 
+   
 
 
 class _RepeatSampler:
