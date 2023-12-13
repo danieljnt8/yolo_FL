@@ -29,7 +29,7 @@ NUM_CLIENTS = 10
 ########
 # todo gmn caranya biar hyp sama opt bisa dipake jg di method train, client_fn dll
     #   jadi global variable?
-device = 'cpu'
+device = torch.device('cpu')
 cfg = 'models/yolov5l-xs-tph.yaml'
 data = './data/VisDrone.yaml'
 data_dict = check_dataset(data)
