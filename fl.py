@@ -14,7 +14,8 @@ from torchvision.datasets import CIFAR10
 ########
 from models.yolo import Model
 from torch.optim import SGD, Adam, lr_scheduler
-from utils.general import check_dataset, labels_to_class_weights, check_img_size
+from torch.cuda import amp
+from utils.general import check_dataset, labels_to_class_weights, check_img_size, one_cycle
 from utils.torch_utils import de_parallel
 from utils.loss import ComputeLoss
 import yaml
@@ -37,11 +38,15 @@ hyp = 'data/hyps/hyp.VisDrone.yaml'
 with open(hyp, errors='ignore') as f:
     hyp = yaml.safe_load(f) 
 names = data_dict['names']  # class names
+cuda = device.type != 'cpu'
 label_smoothing = 0.0
 imgsz = 640
 batch_size = 4
 adam = True
 RANK = int(os.getenv('RANK', -1))
+WORLD_SIZE = int(os.getenv('WORLD_SIZE', 1))
+quad = False
+linear_lr = False
 
 
 DEVICE = torch.device("cpu")  # Try "cuda" to train on GPU
@@ -64,10 +69,20 @@ def set_parameters(net, parameters: List[np.ndarray]):
 
 def train(net, trainloader, config, epochs):
 
+    scaler = amp.GradScaler(enabled=cuda)
+
+    # scheduler
+    if linear_lr:
+        lf = lambda x: (1 - x / (epochs - 1)) * (1.0 - hyp['lrf']) + hyp['lrf']  # linear
+    else:
+        lf = one_cycle(1, hyp['lrf'], epochs)  # cosine 1->hyp['lrf']
+    scheduler = lr_scheduler.LambdaLR(optimizer, lr_lambda=lf)  # plot_lr_scheduler(optimizer, scheduler, epochs)
+
     # loss function
     compute_loss = ComputeLoss(net)
 
     # optimizer
+    nbs = 64
     nb = len(trainloader)
 
     g0, g1, g2 = [], [], []  # optimizer parameter groups
@@ -112,6 +127,35 @@ def train(net, trainloader, config, epochs):
                     x['lr'] = np.interp(ni, xi, [hyp['warmup_bias_lr'] if j == 2 else 0.0, x['initial_lr'] * lf(epoch)])
                     if 'momentum' in x:
                         x['momentum'] = np.interp(ni, xi, [hyp['warmup_momentum'], hyp['momentum']])
+
+            with amp.autocast(enabled=cuda):
+                pred = NUM_CLIENTS(imgs)  # forward
+                loss, loss_items = compute_loss(pred, targets.to(device))  # loss scaled by batch_size
+                if RANK != -1:
+                    loss *= WORLD_SIZE  # gradient averaged between devices in DDP mode
+                if quad:
+                    loss *= 4.
+
+            # Backward
+            scaler.scale(loss).backward()
+
+            # Optimize
+            if ni - last_opt_step >= accumulate:
+                scaler.step(optimizer)  # optimizer.step
+                scaler.update()
+                optimizer.zero_grad()
+                last_opt_step = ni
+            
+            if RANK in [-1, 0]:
+                mloss = (mloss * i + loss_items) / (i + 1)  # update mean losses
+                mem = f'{torch.cuda.memory_reserved() / 1E9 if torch.cuda.is_available() else 0:.3g}G'  # (GB)
+                pbar.set_description(('%10s' * 2 + '%10.4g' * 5) % (
+                    f'{epoch}/{epochs - 1}', mem, *mloss, targets.shape[0], imgs.shape[-1]))
+                
+                # callbacks.run('on_train_batch_end', ni, model, imgs, targets, paths, plots, opt.sync_bn)
+        
+        # Scheduler
+        scheduler.step()
 
 
 
