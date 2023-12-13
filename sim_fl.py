@@ -420,7 +420,7 @@ def set_parameters(net, parameters: List[np.ndarray]):
     state_dict = OrderedDict({k: torch.Tensor(v) for k, v in params_dict})
     net.load_state_dict(state_dict, strict=True)
 
-device = select_device(opt.device, batch_size=opt.batch_size)
+
 
 class FlowerClient(fl.client.NumPyClient):
     def __init__(self, net, trainloader, valloader):
@@ -509,6 +509,7 @@ def prepare(opt, callbacks=Callbacks()):
     return test_dataloader,val_loader,dataset,model
 
 opt = parse_opt()
+device = select_device(opt.device, batch_size=opt.batch_size)
 
 train_loader,val_loader,dataset,model= prepare(opt)
 
