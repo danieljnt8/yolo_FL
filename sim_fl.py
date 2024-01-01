@@ -31,7 +31,7 @@ from models.yolo import Model
 from utils.autoanchor import check_anchors
 from utils.autobatch import check_train_batch_size
 from utils.callbacks import Callbacks
-from utils.datasets import create_dataloader,create_dataloaders_fl
+from utils.datasets import create_dataloader,create_dataloaders_fl,create_dataloaders
 from utils.downloads import attempt_download
 from utils.general import (LOGGER, check_dataset, check_file, check_git_status, check_img_size, check_requirements,
                            check_suffix, check_yaml, colorstr, get_latest_run, increment_path, init_seeds,
@@ -44,6 +44,7 @@ from utils.metrics import fitness
 from utils.plots import plot_evolve, plot_labels
 from utils.torch_utils import (EarlyStopping, ModelEMA, de_parallel, intersect_dicts, select_device,
                                torch_distributed_zero_first)
+from val_fl import val_fl
 
 LOCAL_RANK = int(os.getenv('LOCAL_RANK', -1))  # https://pytorch.org/docs/stable/elastic/run.html
 RANK = int(os.getenv('RANK', -1))
@@ -138,7 +139,7 @@ def init_helper(hyp,  # path/to/hyp.yaml or hyp dictionary
     init_seeds(1 + RANK)
     with torch_distributed_zero_first(LOCAL_RANK):
         data_dict = data_dict or check_dataset(data)  # check if None
-    train_path, val_path = data_dict['train'], data_dict['val']
+    train_path, val_path = data_dict['train'], data_dict['val_fl']
     nc = 1 if single_cls else int(data_dict['nc'])  # number of classes
     names = ['item'] if single_cls and len(data_dict['names']) != 1 else data_dict['names']  # class names
     assert len(names) == nc, f'{len(names)} names found for nc={nc} dataset in {data}'  # check
@@ -162,10 +163,18 @@ def init_helper(hyp,  # path/to/hyp.yaml or hyp dictionary
  
 
  
-    train_loader,val_loader ,dataset = create_dataloaders_fl(train_path, imgsz, batch_size // WORLD_SIZE, gs, single_cls,
+    train_loader,dataset = create_dataloaders(train_path, imgsz, batch_size // WORLD_SIZE, gs, single_cls,
                                               hyp=hyp, augment=True, cache=opt.cache, rect=opt.rect, rank=LOCAL_RANK,
                                               workers=workers, image_weights=True, quad=opt.quad,
-                                              prefix=colorstr('train: '),num_clients=num_clients,train_ratio = 0.8)
+                                              prefix=colorstr('train: '),num_clients=num_clients)
+
+    val_loader = create_dataloaders(val_path, imgsz, batch_size // WORLD_SIZE, gs, single_cls,
+                                              hyp=hyp, augment=True, cache=opt.cache, rect=opt.rect, rank=LOCAL_RANK,
+                                              workers=workers, image_weights=True, quad=opt.quad,
+                                              prefix=colorstr('train: '),num_clients=num_clients)
+                
+
+        
 
     
     
@@ -181,7 +190,8 @@ def train(hyp,  # path/to/hyp.yaml or hyp dictionary
           device,
           cid,
           callbacks,
-          model
+          model,
+          train_loader
           ):
     save_dir, epochs, batch_size, single_cls, evolve, data, cfg, resume, noval, nosave, workers, freeze, = \
         Path(opt.save_dir), opt.epochs, opt.batch_size,  opt.single_cls, opt.evolve, opt.data, opt.cfg, \
@@ -214,7 +224,7 @@ def train(hyp,  # path/to/hyp.yaml or hyp dictionary
     init_seeds(1 + RANK)
     with torch_distributed_zero_first(LOCAL_RANK):
         data_dict = data_dict or check_dataset(data)  # check if None
-    train_path, val_path = data_dict['train'], data_dict['val']
+    train_path, val_path = data_dict['train'], data_dict['val_fl']
     nc = 1 if single_cls else int(data_dict['nc'])  # number of classes
     names = ['item'] if single_cls and len(data_dict['names']) != 1 else data_dict['names']  # class names
     assert len(names) == nc, f'{len(names)} names found for nc={nc} dataset in {data}'  # check
@@ -290,10 +300,7 @@ def train(hyp,  # path/to/hyp.yaml or hyp dictionary
         LOGGER.info('Using SyncBatchNorm()')
 
     # Trainloader
-    train_loader, dataset = create_dataloader(train_path, imgsz, batch_size // WORLD_SIZE, gs, single_cls,
-                                              hyp=hyp, augment=True, cache=opt.cache, rect=opt.rect, rank=LOCAL_RANK,
-                                              workers=workers, image_weights=opt.image_weights, quad=opt.quad,
-                                              prefix=colorstr('train: '))
+    
     mlc = int(np.concatenate(dataset.labels, 0)[:, 0].max())  # max label class
     nb = len(train_loader)  # number of batches
     assert mlc < nc, f'Label class {mlc} exceeds nc={nc} in {data}. Possible class labels are 0-{nc - 1}'
@@ -449,14 +456,13 @@ class FlowerClient(fl.client.NumPyClient):
 
     def fit(self, parameters, config):
         set_parameters(self.net, parameters)
-        train(opt.hyp, opt,device, self.cid,callbacks=Callbacks(),model= self.net)
+        train(opt.hyp, opt,device, self.cid,callbacks=Callbacks(),model= self.net,train_loader = self.trainloader)
         return get_parameters(self.net), len(self.trainloader), {}
 
     def evaluate(self, parameters, config):
         set_parameters(self.net, parameters)
-        loss, accuracy = (0,0)#test(self.net, self.valloader)
-        return float(loss), len(self.valloader), {"accuracy": float(accuracy)}
-
+        val_fl(opt.data,self.net,self.cid,batch_size=opt.batch_size)
+        
 
 
 def client_fn(cid: str) -> FlowerClient:
@@ -534,9 +540,9 @@ train_loader,val_loader,dataset,model= prepare(opt)
 strategy = fl.server.strategy.FedAvg(
     fraction_fit=1.0,  # Sample 100% of available clients for training
     fraction_evaluate=0.5,  # Sample 50% of available clients for evaluation
-    min_fit_clients=1,  # Never sample less than 10 clients for training
-    min_evaluate_clients=1,  # Never sample less than 5 clients for evaluation
-    min_available_clients=1  # Wait until all 10 clients are available
+    min_fit_clients=2,  # Never sample less than 10 clients for training
+    min_evaluate_clients=2,  # Never sample less than 5 clients for evaluation
+    min_available_clients=2  # Wait until all 10 clients are available
 )
 
 
@@ -547,7 +553,7 @@ if DEVICE.type == "cuda":
 fl.simulation.start_simulation(
     client_fn=client_fn,
     num_clients=2,
-    config=fl.server.ServerConfig(num_rounds=5),
+    config=fl.server.ServerConfig(num_rounds=2),
     strategy=strategy,
     client_resources=client_resources,
 )
