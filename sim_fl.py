@@ -18,6 +18,8 @@ from torch.cuda import amp
 from torch.nn.parallel import DistributedDataParallel as DDP
 from torch.optim import SGD, Adam, lr_scheduler
 from tqdm import tqdm
+from collections import defaultdict
+from typing import Dict, List, Optional, Tuple
 
 FILE = Path(__file__).resolve()
 ROOT = FILE.parents[0]  # YOLOv5 root directory
@@ -139,7 +141,7 @@ def init_helper(hyp,  # path/to/hyp.yaml or hyp dictionary
     init_seeds(1 + RANK)
     with torch_distributed_zero_first(LOCAL_RANK):
         data_dict = data_dict or check_dataset(data)  # check if None
-    train_path, val_path = data_dict['train'], data_dict['val_fl']
+    train_path, val_path = data_dict['train'], data_dict['val']
     nc = 1 if single_cls else int(data_dict['nc'])  # number of classes
     names = ['item'] if single_cls and len(data_dict['names']) != 1 else data_dict['names']  # class names
     assert len(names) == nc, f'{len(names)} names found for nc={nc} dataset in {data}'  # check
@@ -200,6 +202,7 @@ def train(hyp,  # path/to/hyp.yaml or hyp dictionary
     # Directories
     print('BEING TRAINED')
     w = save_dir /str(cid)/'weights'  # weights dir
+    
     (w.parent if evolve else w).mkdir(parents=True, exist_ok=True)  # make dir
     #last, best = w / 'last.pt', w / 'best.pt'
     weights_p = w / 'weights.pt'
@@ -440,6 +443,11 @@ def set_parameters(net, parameters: List[np.ndarray]):
     state_dict = OrderedDict({k: torch.Tensor(v) for k, v in params_dict})
     net.load_state_dict(state_dict, strict=True)
 
+def save_model(net, save_path: str):
+    # Save the state dictionary along with weights to a .pt file
+    torch.save({'state_dict': net.state_dict(),
+                'weights': [param.detach().numpy() for param in net.parameters()]}, save_path)
+
 
 
 class FlowerClient(fl.client.NumPyClient):
@@ -461,7 +469,7 @@ class FlowerClient(fl.client.NumPyClient):
 
     def evaluate(self, parameters, config):
         set_parameters(self.net, parameters)
-        val_fl(opt.data,self.net,self.cid,batch_size=opt.batch_size)
+        #val_fl(opt.data,self.net,self.cid,batch_size=opt.batch_size)
         
 
 
@@ -534,7 +542,25 @@ device = select_device(opt.device, batch_size=opt.batch_size)
 
 train_loader,val_loader,dataset,model= prepare(opt)
 
+# The `evaluate` function will be by Flower called after every round
+def evaluate_server(
+    server_round: int,
+    parameters: fl.common.NDArrays,
+    config
+) -> Optional[Tuple[float, Dict[str, fl.common.Scalar]]]:
+    net = model
     
+    save_dir = increment_path(Path(opt.save_dir) /"server"/"round", exist_ok=False)
+    weights_p = save_dir/ 'weights.pt'
+
+    (save_dir.parent if opt.evolve else save_dir).mkdir(parents=True, exist_ok=True)  # make dir
+    set_parameters(net, parameters)  # Update model with the latest parameters
+    #val_fl(opt.data,net,self.cid,batch_size=opt.batch_size)
+
+    save_model(net,weights_p)
+    return 0, {"accuracy": 0}
+
+
 
 # Create FedAvg strategy
 strategy = fl.server.strategy.FedAvg(
@@ -542,7 +568,8 @@ strategy = fl.server.strategy.FedAvg(
     fraction_evaluate=0.5,  # Sample 50% of available clients for evaluation
     min_fit_clients=2,  # Never sample less than 10 clients for training
     min_evaluate_clients=2,  # Never sample less than 5 clients for evaluation
-    min_available_clients=2  # Wait until all 10 clients are available
+    min_available_clients=2 , # Wait until all 10 clients are available
+    evaluate_fn = evaluate_server
 )
 
 
@@ -553,7 +580,7 @@ if DEVICE.type == "cuda":
 fl.simulation.start_simulation(
     client_fn=client_fn,
     num_clients=2,
-    config=fl.server.ServerConfig(num_rounds=2),
+    config=fl.server.ServerConfig(num_rounds=8),
     strategy=strategy,
     client_resources=client_resources,
 )
