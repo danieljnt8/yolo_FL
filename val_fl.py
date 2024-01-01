@@ -83,7 +83,7 @@ def process_batch(detections, labels, iouv):
 @torch.no_grad()
 def val_fl(data,
         model,
-        cid,
+        cid=None,
         weights=None,  # model.pt path(s)
         batch_size=32,  # batch size
         imgsz=640,  # inference size (pixels)
@@ -118,7 +118,11 @@ def val_fl(data,
         device = select_device(device, batch_size=batch_size)
         
         # Directories
-        save_dir = increment_path(Path(project) /name/str(cid) /"round", exist_ok=exist_ok)  # increment run
+        if cid is None:
+            saved_type = "server"
+        else:
+            saved_type = str(cid)
+        save_dir = increment_path(Path(project) /name/saved_type /"round", exist_ok=exist_ok)  # increment run
         (save_dir / 'labels' if save_txt else save_dir).mkdir(parents=True, exist_ok=True)  # make dir
 
         # Load model
