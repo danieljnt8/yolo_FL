@@ -70,7 +70,7 @@ print(
 
 def parse_opt(known=False):
     parser = argparse.ArgumentParser()
-    parser.add_argument('--weights', type=str, default=ROOT / 'yolov5s.pt', help='initial weights path')
+    parser.add_argument('--weights', type=str, default=ROOT / 'data/pretrained_weights/yolov5l.pt', help='initial weights path')
     parser.add_argument('--cfg', type=str, default='', help='model.yaml path')
     parser.add_argument('--data', type=str, default=ROOT / 'data/coco128.yaml', help='dataset.yaml path')
     parser.add_argument('--hyp', type=str, default=ROOT / 'data/hyps/hyp.scratch.yaml', help='hyperparameters path')
@@ -100,7 +100,7 @@ def parse_opt(known=False):
     parser.add_argument('--linear-lr', action='store_true', help='linear LR')
     parser.add_argument('--label-smoothing', type=float, default=0.0, help='Label smoothing epsilon')
     parser.add_argument('--patience', type=int, default=100, help='EarlyStopping patience (epochs without improvement)')
-    parser.add_argument('--freeze', type=int, default=0, help='Number of layers to freeze. backbone=10, all=24')
+    parser.add_argument('--freeze', type=int, default=24, help='Number of layers to freeze. backbone=10, all=24')
     parser.add_argument('--save-period', type=int, default=-1, help='Save checkpoint every x epochs (disabled if < 1)')
     parser.add_argument('--local_rank', type=int, default=-1, help='DDP parameter, do not modify')
 
@@ -118,9 +118,9 @@ def init_helper(hyp,  # path/to/hyp.yaml or hyp dictionary
           opt,
             device
           ):
-    save_dir, epochs, batch_size, weights, single_cls, evolve, data, cfg, resume, noval, nosave, workers, freeze, = \
+    save_dir, epochs, batch_size, weights, single_cls, evolve, data, cfg, resume, noval, nosave, workers, freeze,weights= \
         Path(opt.save_dir), opt.epochs, opt.batch_size, opt.weights, opt.single_cls, opt.evolve, opt.data, opt.cfg, \
-        opt.resume, opt.noval, opt.nosave, opt.workers, opt.freeze
+        opt.resume, opt.noval, opt.nosave, opt.workers, opt.freeze,opt.weights
 
    
     num_clients = opt.num_clients
@@ -144,8 +144,25 @@ def init_helper(hyp,  # path/to/hyp.yaml or hyp dictionary
     assert len(names) == nc, f'{len(names)} names found for nc={nc} dataset in {data}'  # check
     is_coco = isinstance(val_path, str) and val_path.endswith('coco/val2017.txt')  # COCO dataset
 
+
+    check_suffix(weights, '.pt')  # check weights
+    pretrained = weights.endswith('.pt')
+    if pretrained:
+        print("PRETRAINED")
+        with torch_distributed_zero_first(LOCAL_RANK):
+            weights = attempt_download(weights)  # download if not found locally
+        ckpt = torch.load(weights, map_location=device)  # load checkpoint
+        model = Model(cfg or ckpt['model'].yaml, ch=3, nc=nc, anchors=hyp.get('anchors')).to(device)  # create
+        exclude = ['anchor'] if (cfg or hyp.get('anchors')) and not resume else []  # exclude keys
+        csd = ckpt['model'].float().state_dict()  # checkpoint state_dict as FP32
+        csd = intersect_dicts(csd, model.state_dict(), exclude=exclude)  # intersect
+        model.load_state_dict(csd, strict=False)  # load
+        LOGGER.info(f'Transferred {len(csd)}/{len(model.state_dict())} items from {weights}')  # report
+    else:
+        print("NOT")
+        model = Model(cfg, ch=3, nc=nc, anchors=hyp.get('anchors')).to(device)  # create
     
-    model = Model(cfg, ch=3, nc=nc, anchors=hyp.get('anchors')).to(device)  # create
+    #model = Model(cfg, ch=3, nc=nc, anchors=hyp.get('anchors')).to(device)  # create
 
     
 
